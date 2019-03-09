@@ -1,0 +1,187 @@
+<html>
+<head>
+<script src="tlsh.js"></script>
+<script src="zlib.js"></script>
+<script src="png.js"></script>
+
+<style>
+	.dropzone
+	{
+		width: 200px;
+		height: 200px;
+		border: 3px dotted #ccc;
+		text-align: center;
+		color: #ccc;
+	}
+	.dragover
+	{
+		border-color: black;
+		color: black;
+	}
+	#btn_search {
+	   width: 200px;
+	   height: 80px;
+	   margin: 5px;
+	}
+	#slider_filter {
+	   width: 50%;
+	}
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div class="dropzone" id="dropzone">Drop files here</div>
+<div><input id="btn_search" type="button" value="search" /><p id="found_count"></p></div>
+<div><label id="slider_label" for="slider_filter">10</label><input id="slider_filter" type="range" min="0" max="100" value="10" /></div>
+<div id="results"></div>
+<script>
+var dropzone = document.getElementById('dropzone');
+var btn_search = document.getElementById('btn_search');
+var slider_filter = document.getElementById('slider_filter');
+var slider_label = document.getElementById('slider_label');
+var results = document.getElementById('results');
+var tiles = [];
+var found = [];
+var dataset = [];
+var is_working = false;
+var is_done = true;
+var timer;
+
+var str = '';
+
+dropzone.ondrop = function(e) {
+    e.preventDefault();
+    var files = e.dataTransfer.files;
+    console.log(files.length);
+    is_done = false;
+    heartbeat(files, load_tiles);
+}
+ 
+dropzone.ondragover = function() {
+	this.className = 'dropzone dragover';
+	return false;
+}
+
+dropzone.ondragleave = function() {
+	this.className = 'dropzone';
+	return false;
+}
+
+btn_search.onclick = function() {
+    console.log('started searching...');
+    found = [];
+    if (!dataset || dataset.length === 0) {
+        document.getElementById("progress").innerHTML = 'loading few megabytes of tile hashes...';
+        fetch('data.json')
+            .then(function(response) {
+                return response.json();
+            })
+            .then(function(data) {
+                console.log('hashes loaded: ' + data.length);
+                document.getElementById("progress").innerHTML = 'hashes loaded: ' + data.length;
+                dataset = data;
+                is_done = false;
+                heartbeat(dataset, proceed_search);
+            });
+    } else {
+        is_done = false;
+        heartbeat(dataset, proceed_search);
+    }
+}
+
+slider_filter.oninput = function() {
+    slider_label.innerHTML = this.value;
+    render_results(this.value);
+}
+
+function load_tiles(files, start, timespan) {
+    is_working = true;
+    var cur = start;
+    var str = '';
+    var bucket = 1000;
+    var finish = Math.min(files.length, start+bucket);
+    for (var i = start; i < finish; i++) {
+        (function(file) {
+          var name = file.name;
+          var reader = new FileReader();  
+          reader.onload = function(e) {
+            PNG.decode(e.target.result).then(function (png) {
+                var data_str = String.fromCharCode.apply(null, png.data);
+                var tlsh_img1 = new Tlsh();
+                tlsh_img1.update(data_str, data_str.length+1);
+                tlsh_img1.finale();
+                //document.getElementById("results").innerHTML += '<br>{"hash": "' + tlsh_img1.hash() + '", "name": "' + name + '"},';
+
+                str += '<br>{"hash": "' + tlsh_img1.hash() + '", "name": "' + name + '"},';
+                tiles.push({"hash": tlsh_img1.hash(), "name": name});
+                cur++;
+                if (cur >= finish) {
+                    document.getElementById("results").innerHTML += str;
+                    str = '';
+                    is_working = false;
+                }
+            });
+          }
+          reader.readAsArrayBuffer(file);
+        })(files[i]);
+    }
+    return finish;
+}
+
+function proceed_search(data, start, timespan) {
+    is_working = true;
+    var ts_start = + new Date();
+    for (var i=start; i<data.length; i++) {
+        if (+ new Date() >= ts_start + timespan) {
+            is_working = false;
+            return i;
+        }
+        var tlsh1 = new Tlsh();
+        tlsh1.fromTlshStr(data[i].hash);
+        for (var j=0; j<tiles.length; j++) {
+            var tlsh2 = new Tlsh();
+            tlsh2.fromTlshStr(tiles[j].hash);
+            var diff = tlsh2.totalDiff(tlsh1);
+            if (diff < 100) {
+                found.push({"diff": diff, "found": data[i].name, "searched": tiles[j].name});
+            }
+        }
+    }
+    is_working = false;
+    is_done = true;
+    clearInterval(timer);
+    document.getElementById("found_count").innerHTML = 'results with diff < 100 found: ' + found.length;
+    slider_filter.oninput();
+}
+
+function heartbeat(data, callback) {
+    if (is_done) {
+        return;
+    }
+    var cur_step = 0;
+    var timespan = 1000;
+    timer = setInterval(function() {
+        if (!is_working) {
+            cur_step = callback(data, cur_step, timespan);
+            document.getElementById("progress").innerHTML = '<p>progress: ' + ((cur_step / data.length * 100) || 100) + '%</p>';
+            if (cur_step >= data.length) {
+                clearInterval(timer);
+                is_done = true;
+                is_working = false;
+            }
+        }
+    }, timespan);
+}
+
+function render_results(filter_level) {
+    var visible = found.filter(function(elem){
+        return elem.diff <= filter_level;
+    });
+    results.innerHTML = visible.reduce(function(list, elem) {
+        var [x, y] = elem.found.replace('.png', '').split('_');
+        return list + '<div>' + '<a target=_blank href="https://www.odditown.com/haven/map/#x='+x+'&y='+y+'&zoom=9"><img src="https://www.odditown.com/haven/map/tiles/9/' + elem.found + '" /></a>' + elem.diff + " " + elem.found + " -> " + elem.searched + '</div>';
+    }, '') || '';
+}
+</script>
+</body>
+</html>
